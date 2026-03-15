@@ -1,0 +1,83 @@
+version: '3'
+services:
+  # 1. The Message Broker (Kafka)
+  # We use 'Redpanda' here - it is 100% Kafka API compatible but 10x lighter/faster
+  # This looks great on resumes as "Modern Kafka"
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    ports:
+      - 9092:9092
+      - 9644:9644
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+
+  # 2. The Database (InfluxDB)
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - 8086:8086
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USER}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PW}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN}
+  redis:
+    image: redis:alpine
+    container_name: redis2
+    ports:
+      - "6379:6379"
+
+  jobmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    ports:
+      - "8081:8081" # The Flink Dashboard UI
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+    volumes:
+      - ./:/project
+
+  # 5. Flink TaskManager (The Worker)
+  taskmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: f1-frontend
+    ports:    
+      - "5173:5173"
+    volumes:
+      # This mapping allows you to edit files on your laptop 
+      # and see changes instantly in the browser (Hot Reloading)
+      - ./frontend:/app
+      - /app/node_modules # Prevent host node_modules from overriding container
+    environment:
+      - CHOKIDAR_USEPOLLING=true
