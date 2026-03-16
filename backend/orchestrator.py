@@ -459,25 +459,44 @@ def get_reference_lap_trace_driver(session_key: int,driver_id: int):
 
 import subprocess
 import time
+def get_container_id(service_name):
+    """Finds container ID by Docker Compose service name."""
+    try:
+        # Filter by the label Docker Compose adds automatically
+        cmd = ["docker", "ps", "-q", "-f", f"label=com.docker.compose.service={service_name}"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"❌ Error finding {service_name}: {e}")
+        return None
 
 def restart_flink():
     print("🔄 Restarting Flink Cluster...")
     
-    # 1. Restart Containers
-    subprocess.run(["docker", "restart", "f1-taskmanager-1", "f1-jobmanager-1"], check=True)
+    # 1. Find the dynamic container IDs
+    jm_id = get_container_id("jobmanager")
+    tm_id = get_container_id("taskmanager")
     
-    # Wait for Flink to boot up (It takes more than 3 seconds usually)
-    time.sleep(10) 
-    
-    print("🚀 Submitting SQL Job...")
-    
-    # 2. Submit Job (Non-Interactive)
-    # We remove '-it'. We just want to execute the script and exit.
+    if not jm_id or not tm_id:
+        print("❌ Could not find Flink containers. Are they running?")
+        return
+
     try:
+        # 2. Restart using IDs
+        # We assume docker CLI is available inside the container
+        subprocess.run(["docker", "restart", tm_id, jm_id], check=True)
+        
+        # Wait for Flink to boot up
+        time.sleep(10) 
+        
+        print("🚀 Submitting SQL Job...")
+        
+        # 3. Submit Job using the JobManager ID
         result = subprocess.run(
-            ["docker", "exec", "f1-jobmanager-1", "./bin/sql-client.sh", "-f", "/project/job.sql"],
+            ["docker", "exec", jm_id, "./bin/sql-client.sh", "-f", "/project/job.sql"],
             capture_output=True, text=True
         )
+        
         if result.returncode == 0:
             print("✅ Job Submitted Successfully")
         else:
@@ -487,6 +506,7 @@ def restart_flink():
         print(f"❌ Subprocess Error: {e}")
 
     time.sleep(2)
+    
 @app.websocket("/ws/race")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
