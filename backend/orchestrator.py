@@ -464,7 +464,7 @@ def restart_flink():
     print("🔄 Restarting Flink Cluster...")
     
     # 1. Restart Containers
-    subprocess.run(["docker", "restart", "f1-taskmanager-1", "f1-jobmanager-1"], check=True)
+    subprocess.run(["docker-compose", "restart", "taskmanager", "jobmanager"], check=True)
     
     # Wait for Flink to boot up (It takes more than 3 seconds usually)
     time.sleep(10) 
