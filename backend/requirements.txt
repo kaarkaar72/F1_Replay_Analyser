@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+redis
+requests
+kafka-python
+influxdb-client
+websockets
+pandas
+numpy

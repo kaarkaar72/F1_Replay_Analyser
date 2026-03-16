@@ -23,6 +23,7 @@ app.add_middleware(
 )
 dotenv.load_dotenv()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+# r.delete('simulation:active')
 INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "UPDATE_FOR_PERSONAL") 
 INFLUX_ORG = "f1_org"
@@ -589,7 +590,7 @@ from datetime import datetime, timedelta
 import math
 @app.get("/track/{session_key}")
 def get_track_shape(session_key: int):
-    cache_key = f"metadata:track:{session_key}"
+    cache_key = f"metadata:tracks:{session_key}"
     if r.exists(cache_key):
         return json.loads(r.get(cache_key))
     
@@ -604,11 +605,11 @@ def get_track_shape(session_key: int):
         meet_url = f"https://api.openf1.org/v1/meetings?meeting_key={sess_data['meeting_key']}"
         meet_data = requests.get(meet_url,headers=HEADERS).json()[0]
         circuit_url = meet_data.get('circuit_info_url')
-        
+        # print(circuit_    url) 
         if circuit_url:
-            headers = {'User-Agent': 'F1-Telemetry-App/1.0'}
-            circuit_data = requests.get(circuit_url, headers=HEADERS).json()
-            
+            lap_headers = HEADERS | {'User-Agent': 'F1-Telemetry-App/1.0'}
+            circuit_data = requests.get(circuit_url, headers=lap_headers).json()
+            # print(circuit_data)
             # 2. Extract Shape (The X/Y Arrays)
             # The API gives separate lists: "x": [1,2,3], "y": [4,5,6]
             # We zip them into points: [{x:1, y:4}, {x:2, y:5}...]
@@ -670,6 +671,7 @@ def get_track_shape(session_key: int):
         print(f"❌ Track Error: {e}")
 
     r.set(cache_key, json.dumps(response_payload,indent=2), ex=86400 * 7)
+    print(response_payload)
     return response_payload
 
 

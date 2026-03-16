@@ -35,7 +35,7 @@ services:
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN}
   redis:
     image: redis:alpine
-    container_name: redis2
+    container_name: redis4
     ports:
       - "6379:6379"
 
