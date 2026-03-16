@@ -2,15 +2,15 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install Docker CLI (So orchestrator can restart Flink)
+# Install system dependencies (curl, docker cli)
 RUN apt-get update && apt-get install -y curl docker.io
 
-# Install Python Deps
+# Install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy Code
+# Copy all python scripts
 COPY . .
 
-# Default Command (Overridden by docker-compose)
-CMD ["uvicorn", "orchestrator:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command (can be overridden)
+CMD ["python", "auth.py"]

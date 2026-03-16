@@ -39,6 +39,17 @@ services:
     ports:
       - "6379:6379"
 
+
+  auth:
+    build: ./backend
+    container_name: f1-auth
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+    command: python auth.py
+    depends_on:
+      - redis
+
   jobmanager:
     build:
       context: .
@@ -51,7 +62,7 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
     volumes:
-      - ./:/project
+      - ./backend:/project
 
   # 5. Flink TaskManager (The Worker)
   taskmanager:
@@ -67,6 +78,47 @@ services:
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
   
+
+  backend:
+    build: ./backend
+    container_name: f1-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app # Hot Reload for Dev
+      - /var/run/docker.sock:/var/run/docker.sock # Allow restarting Flink containers
+    environment:
+      - REDIS_HOST=redis
+      - KAFKA_SERVER=redpanda:29092
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+      - INFLUX_ORG=${INFLUX_ORG}
+      - INFLUX_BUCKET=${INFLUX_BUCKET}
+      - INFLUX_USER=${INFLUX_USER}
+      - INFLUX_PW=${INFLUX_PW}
+      - F1_ACCESS_TOKEN=${F1_ACCESS_TOKEN}
+    command: uvicorn orchestrator:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - redis
+      - redpanda
+      - influxdb
+
+
+  consumer:
+    build: ./backend
+    container_name: f1-consumer
+    volumes:
+      - ./backend:/app
+    environment:
+      - REDIS_HOST=redis
+      - KAFKA_SERVER=redpanda:29092
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+    command: python consumer.py
+    depends_on:
+      - backend # Wait for API to be ready
+
+
   frontend:
     build:
       context: ./frontend

@@ -8,12 +8,12 @@ import os
 import time
 
 # --- CONFIGURATION ---
-KAFKA_SERVER = os.getenv("KAFKA_SERVER", "localhost:9092")
-INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "DJu7xGthqp8eGJuj_xn1MyPqQqfqi_ZPpLc-qNiZ2rvEOuflEVKmqOh5H6QU_matoCtnHnJmedkYtd1dbAzHbQ==") 
+KAFKA_SERVER = os.getenv("KAFKA_SERVER", "redpanda:9092")
+INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "Get your own") 
 INFLUX_ORG = "f1_org"
 INFLUX_BUCKET = "f1_telemetry"
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = 6379
 
 # --- 1. SETUP CONNECTIONS ---

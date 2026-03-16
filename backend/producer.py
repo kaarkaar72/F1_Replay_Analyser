@@ -1,4 +1,5 @@
 import json
+import redis
 import time
 import dotenv
 import requests
@@ -39,11 +40,17 @@ STREAMS = {
 DRIVER_STREAMS = ["telemetry", "location", "intervals"]
 GLOBAL_STREAMS = ["weather", "race_control", "laps", "pit", "position", "overtakes", "stints"]
 dotenv.load_dotenv()
-F1_ACCESS_TOKEN = os.getenv("F1_ACCESS_TOKEN","PAY_FOR_YOURS")
-HEADERS = {
-    "accept": "application/json",
-    "Authorization": f"Bearer {F1_ACCESS_TOKEN}"
-}
+
+REDIS_HOST = os.getenv("REDIS_HOST", "redis") 
+r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+def get_headers():
+    token = r.get("f1_api_token")
+    if not token:
+        print("⚠️ No Token in Redis! Waiting...")
+        time.sleep(5)
+        return get_headers()
+    return {"accept": "application/json", "Authorization": f"Bearer {token}"}
+HEADERS = get_headers()
 # GLOBAL_STREAMS = ["laps"]
 # --- KAFKA SETUP ---
 try:

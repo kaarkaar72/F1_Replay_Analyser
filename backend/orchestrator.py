@@ -22,21 +22,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 dotenv.load_dotenv()
-r = redis.Redis(host='localhost', port=6379, decode_responses=True)
-# r.delete('simulation:active')
+REDIS_HOST = os.getenv("REDIS_HOST", "redis") 
+r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "UPDATE_FOR_PERSONAL") 
 INFLUX_ORG = "f1_org"
 INFLUX_BUCKET = "f1_telemetry"
 influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 query_api = influx_client.query_api()
-
-F1_ACCESS_TOKEN = os.getenv("F1_ACCESS_TOKEN","PAY_FOR_YOURS")
-HEADERS = {
-    "accept": "application/json",
-    "Authorization": f"Bearer {F1_ACCESS_TOKEN}"
-}
-print(HEADERS)
+def get_headers():
+    token = r.get("f1_api_token")
+    if not token:
+        print("⚠️ No Token in Redis! Waiting...")
+        time.sleep(5)
+        return get_headers()
+    return {"accept": "application/json", "Authorization": f"Bearer {token}"}
+HEADERS = get_headers()
 # Global variable to track the running process
 current_process = None
 

@@ -2,6 +2,5 @@
 .env.local
 venv/
 __pycache__/
-race_cache/
-track_shape.csv
+backend/race_cache/
 F1_AUTH.pem
