@@ -17,6 +17,7 @@ from producer import to_ms
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
+    allow_credentials=True,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -179,19 +180,15 @@ def get_simulation_status():
 
 
 @app.get("/analysis/laps/{session_key}/{driver_id}")
-def get_driver_laps(session_key: int, driver_id: int,time: int = None):
+def get_driver_laps(session_key: int, driver_id: int):
     """Fetches lap history for scatter plot"""
     print(f"📊 Fetching Laps for {driver_id}...")
-    if time:
-        # Convert MS to Seconds
-        ts_sec = time / 1000
-        
-        # Create Aware Datetime (UTC)
-        dt = datetime.fromtimestamp(ts_sec,tz=timezone.utc)
-        dt_stop = dt + timedelta(minutes=120)
-        dt_start = dt - timedelta(minutes=120)
-        stop_iso = dt_stop.isoformat() 
-        start_iso = dt_start.isoformat()
+    # 1. Get Session Date
+    session_info = get_session_info(session_key)
+    date_str = session_info['date'].split('T')[0] # "2023-05-28"
+    
+    start_iso = f"{date_str}T00:00:00Z"
+    stop_iso = f"{date_str}T23:59:59Z"
 
     query = f"""
     from(bucket: "{INFLUX_BUCKET}")
@@ -199,7 +196,7 @@ def get_driver_laps(session_key: int, driver_id: int,time: int = None):
       |> filter(fn: (r) => r["_measurement"] == "laps")
       |> filter(fn: (r) => r["session"] == "s_{session_key}")
       |> filter(fn: (r) => r["driver"] == "{driver_id}")
-      |> filter(fn: (r) => r["_field"] == "lap_duration")
+      |> filter(fn: (r) => r["_field"] == "lap_duration" or r["_field"] == "s1" or r["_field"] == "s2" or r["_field"] == "s3")
       |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
       |> sort(columns: ["lap_number"])
     """
@@ -216,9 +213,24 @@ def get_driver_laps(session_key: int, driver_id: int,time: int = None):
                 if lap_dur:
                     data.append({
                         "lap": int(lap_num), # Simple counter if lap_num missing
-                        "time": float(lap_dur)
+                        "time": float(lap_dur),
+                        "s1": float(vals.get('s1') or 0),
+                        "s2": float(vals.get('s2') or 0),
+                        "s3": float(vals.get('s3') or 0)
                     })
-        return data
+        best_time = min(d['time'] for d in data) if data else 0
+        clean_laps = [d['time'] for d in data if d['time'] < best_time * 1.07]
+        import statistics
+        stats = {
+            "best_lap": best_time,
+            "avg_pace": statistics.mean(clean_laps) if clean_laps else 0,
+            "consistency": statistics.stdev(clean_laps) if len(clean_laps) > 1 else 0,
+            "total_laps": len(data)
+        }
+        return {
+            "laps": data,
+            "stats": stats # <--- NEW
+        }
     except Exception as e:
         print(f"❌ Influx Error: {e}")
         return []
@@ -302,7 +314,7 @@ def get_lap_times_for_lap(session_key,driver_id,lap_number):
     laps_res = query_api.query(laps_query)
     if not laps_res or not laps_res[0].records:
         return []
-    # print(laps_res) 
+
     lap_record = laps_res[0].records[0]
     start_ms = int(lap_record["start_time_ms"])
     end_ms = int(lap_record["end_time_ms"])
@@ -317,6 +329,7 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
             |> filter(fn: (r) => r["session"] == "s_{session_key}")
             |> filter(fn: (r) => r["driver"] == "{driver_id}")
             |> filter(fn: (r) => r["_field"] == "speed" or r["_field"] == "throttle" or r["_field"] == "brake" or r["_field"] == "gear" or r["_field"] == "x" or r["_field"] == "y")
+            |> aggregateWindow(every: 200ms, fn: mean, createEmpty: false)
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
             |> sort(columns: ["_time"])
         """
@@ -330,17 +343,6 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
             # print(last_x,last_y,x,y,total_dist)
             current_time = record.get_time().timestamp()
             speed_kph = float(record.values.get("speed", 0))
-            # x = float(record.values.get("x", 0))
-            # y = float(record.values.get("y", 0))
-            # print(last_x,last_y,x,y,total_dist)
-            # if last_x == 0.0 and last_y == 0.0:
-            #     last_x, last_y = x, y
-            #     continue
-
-            # if x != 0 and y != 0 and last_x != 0 and last_y != 0:
-            #     dist_step = math.sqrt((x - last_x)**2 + (y - last_y)**2)
-            #     if dist_step < 100: 
-            #         total_dist += dist_step
 
             if last_time is not None:
                 dt = current_time - last_time # Seconds
@@ -357,7 +359,6 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
                 "x": float(record.values.get("x", 0)),
                 "y": float(record.values.get("y", 0)),
             })
-                # last_x,last_y = x,y
             last_time = current_time
 
     for p in data:
@@ -369,38 +370,98 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
 def get_advanced_metrics_for_lap_telemetry(data):
     speeds = [p['speed'] for p in data]
     throttles = [p['throttle'] for p in data]
+    brakes = [p['brake'] for p in data]
+    gears = [p['gear'] for p in data]
+    braking_zones = 0
+    in_braking_zone = False
     
+    for b in brakes:
+        if b > 50 and not in_braking_zone:
+            braking_zones += 1
+            in_braking_zone = True
+        elif b < 10:
+            in_braking_zone = False
+
+    coast_points = sum(1 for i in range(len(data)) if throttles[i] < 5 and brakes[i] < 5)
+    coast_duration = coast_points * 0.2 
+    gear_shifts = sum(1 for i in range(1, len(gears)) if gears[i] != gears[i-1])
+
+    throttle_deltas = [abs(throttles[i] - throttles[i-1]) for i in range(1, len(throttles))]
+    aggression = sum(throttle_deltas) / len(throttle_deltas) if throttle_deltas else 0
+
+    # 8. Low Speed Grip (Min Speed Average)
+    low_speed_points = [s for s in speeds if s < 100 and s > 0]
+    low_speed_avg = sum(low_speed_points) / len(low_speed_points) if low_speed_points else 0
     metrics = {
         "max_speed": max(speeds) if speeds else 0,
         "avg_speed": sum(speeds)/len(speeds) if speeds else 0,
         "full_throttle_pct": (sum(1 for t in throttles if t > 99) / len(throttles)) * 100 if throttles else 0,
-        "braking_zones": 0 # Logic to count big drops in speed
+        "braking_zones": braking_zones,
+        "coast_duration": round(coast_duration, 2),
+        "gear_shifts": gear_shifts,
+        "throttle_aggression": round(aggression, 1),
+        "low_speed_grip": int(low_speed_avg)
     }
     return metrics
 
 def get_corner_metrics_for_lap_telemetry(data,corner_map):
     corner_stats = []
+    
+    # 1. Normalize Telemetry Distances (0-100%)
+    # (Assuming 'data' already has 'distance_pct' from get_lap_telemetry)
+
     for c in corner_map:
-            c_dist = c['distance'] # e.g. 450m
+        c_pct = c.get('distance_pct')
+        if c_pct is None: continue
+
+        # Filter points within 1.5% window of the corner
+        zone_points = [p for p in data if abs(p['distance_pct'] - c_pct) < 1.5]
+        
+        if zone_points:
+            min_speed = min(p['speed'] for p in zone_points)
+            # Find point closest to the center of the corner
+            apex_point = min(zone_points, key=lambda p: abs(p['distance_pct'] - c_pct))
+            apex_speed = apex_point['speed']
+        else:
+            min_speed = 0
+            apex_speed = 0
             
-            # Find telemetry point closest to this distance
-            # Simple linear search or binary search
-            closest_point = min(data, key=lambda p: abs(p['distance'] - c_dist))
-            
-            # We actually want MIN speed in the "Braking Zone" (e.g. +/- 50m around apex)
-            # Filter points within 50m
-            zone_points = [p for p in data if abs(p['distance'] - c_dist) < 50]
-            min_speed = min([p['speed'] for p in zone_points]) if zone_points else 0
-            
-            corner_stats.append({
-                "number": c['number'],
-                "min_speed": int(min_speed),
-                "apex_speed": int(closest_point['speed'])
-            })
+        corner_stats.append({
+            "number": c['number'],
+            "distance_pct": c['distance_pct'],
+            "min_speed": int(min_speed),
+            "apex_speed": int(apex_speed)
+        })
+        
     return corner_stats
 
 
-
+def get_sector_times_lap(session_key,driver_id,lap_number):
+    session_info = get_session_info(session_key)
+    date_str = session_info['date'].split('T')[0]
+    sector_query = f"""
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {date_str}T00:00:00Z, stop: {date_str}T23:59:59Z)
+      |> filter(fn: (r) => r["session"] == "{session_key}" and r["driver"] == "{driver_id}")
+      |> filter(fn: (r) => r["lap_number"] == "{lap_number}")
+      |> filter(fn: (r) => r["_field"] == "s1" or r["_field"] == "s2" or r["_field"] == "s3" or r["_field"] == "lap_duration" )
+      |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+    """
+    
+    sectors = {"s1": 0, "s2": 0, "s3": 0,"lap_duration":0}
+    try:
+        sec_res = query_api.query(sector_query)
+        if sec_res and sec_res[0].records:
+            rec = sec_res[0].records[0]
+            sectors = {
+                "s1": rec.values.get("s1", 0),
+                "s2": rec.values.get("s2", 0),
+                "s3": rec.values.get("s3", 0),
+                "lap_duration": rec.values.get("lap_duration",0)
+            }
+        return sectors
+    except:
+        pass
 
 @app.get("/analysis/lap-telemetry/{session_key}/{driver_id}/{lap_number}")
 def get_lap_telemetry_trace(session_key: int, driver_id: int, lap_number: int = None):
@@ -411,17 +472,24 @@ def get_lap_telemetry_trace(session_key: int, driver_id: int, lap_number: int = 
     
     try:
         start_lap_iso,stop_lap_iso = get_lap_times_for_lap(session_key,driver_id,lap_number)
+        sectors = get_sector_times_lap(session_key,driver_id,lap_number)
+        # print(start_lap_iso,stop_lap_iso)
         telemetry_data = get_telemetry_over_time(session_key,driver_id,start_lap_iso,stop_lap_iso)
-        track_meta = json.loads(r.get(f"metadata:track:{session_key}"))
+        # print(telemetry_data)
+        track_meta = json.loads(r.get(f"metadata:tracks:{session_key}"))
         corner_map = track_meta['corners']
+
         metrics = get_advanced_metrics_for_lap_telemetry(telemetry_data)
+        # print(metrics)
         corner_stats = get_corner_metrics_for_lap_telemetry(telemetry_data,corner_map)
-        
+        # print(corner_stats)
         data = {"lap":lap_number,
-                "telemetry":telemetry_data,
-                "trace": telemetry_data[::15],
+                "driver":driver_id,
+                "trace": telemetry_data,
                 "metrics":metrics,
+                "sectors":sectors,
                 "corner_stat":corner_stats}
+        # print(data)
         if data:
             r.set(cache_key, json.dumps(data), ex=86400)
         
@@ -435,22 +503,24 @@ def get_lap_telemetry_trace(session_key: int, driver_id: int, lap_number: int = 
 @app.get("/analysis/reference-lap/{session_key}")
 def get_reference_lap_trace(session_key: int):
     # 1. Read Redis
-    stats = r.hgetall(f"stats:{session_key}:fastest_lap")
+    stats = r.hgetall(f"stats2:{session_key}:fastest_lap")
     if not stats:
         return [] # No laps yet
 
+    print("ASDSDADSDCASDSA")
     driver_id = int(stats['driver'])
     lap_num = int(stats['lap'])
     
     # 2. Fetch Telemetry for that specific Driver/Lap
     data = get_lap_telemetry_trace(session_key, driver_id, lap_num)
+    print(data)
     return data
 
 
 @app.get("/analysis/best-driver-lap/{session_key}/{driver_id}")
 def get_reference_lap_trace_driver(session_key: int,driver_id: int):
     # 1. Read Redis
-    stats = r.hgetall(f"stats:{session_key}:driver:{driver_id}:best_lap")
+    stats = r.hgetall(f"stats2:{session_key}:driver:{driver_id}:best_lap")
     if not stats:
         return [] # No laps yet
     lap_num = int(stats['lap'])
@@ -506,7 +576,7 @@ def restart_flink():
         print(f"❌ Subprocess Error: {e}")
 
     time.sleep(2)
-    
+
 @app.websocket("/ws/race")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -545,7 +615,7 @@ def get_session_info(session_key: int):
     
     # 1. Fetch Session Details (Name, Date)
     sess_url = f"https://api.openf1.org/v1/sessions?session_key={session_key}"
-    print(sess_url)
+    # print(sess_url)
     sess_data = requests.get(sess_url,headers=HEADERS).json()[0]
     
     # 2. Fetch Meeting Details (Circuit Name, Country)
@@ -692,7 +762,7 @@ def get_track_shape(session_key: int):
         print(f"❌ Track Error: {e}")
 
     r.set(cache_key, json.dumps(response_payload,indent=2), ex=86400 * 7)
-    print(response_payload)
+    # print(response_payload)
     return response_payload
 
 

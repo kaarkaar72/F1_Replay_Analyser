@@ -169,16 +169,21 @@ for message in consumer:
                     .field("lap_duration", lap_duration) \
                     .field("start_time_ms", start_time_ms) \
                     .field("end_time_ms", event_time)  \
+                    .field("s1",data.get('duration_sector_1') or 0) \
+                    .field("s2",data.get('duration_sector_2') or 0) \
+                    .field("s3",data.get('duration_sector_3') or 0) \
+                    .field("segments_s1",json.dumps(data['segments_sector_1'])) \
+                    .field("segments_s2",json.dumps(data['segments_sector_2'])) \
+                    .field("segments_s3",json.dumps(data['segments_sector_3'])) \
                     .time(event_time, write_precision='ms')
-
                     write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
                     print(f"💾 Saved Lap {data['lap_number']} to Influx")
             except Exception as e:
                 print(f"Influx Write Error: {e}")
 
             lap = int(data.get('lap_number') or 0)
-            record_key = f"stats:{session_key}:fastest_lap"
-            pb_key = f"stats:{session_key}:driver:{driver_id}:best_lap"
+            record_key = f"stats2:{session_key}:fastest_lap"
+            pb_key = f"stats2:{session_key}:driver:{driver_id}:best_lap"
             current_lap_pb_record = redis_client.hgetall(record_key)
             current_driver_pb_record = redis_client.hgetall(pb_key)
             current_lap_pb = float(current_lap_pb_record.get('time', 0) or float('inf'))

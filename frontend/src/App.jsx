@@ -394,24 +394,16 @@ function App() {
             </div>
             </div>
           </div> 
-
-
-          {/* <DriverAnalysis 
-                  driver={analysisDriver || driverList[0]} // Default to P1 if none selected
-                  sessionKey={activeSession}
-                  currentTimestamp={currentTimestamp}
-                  onBack={() => setCurrentView('race')}
-                  trackData={{ 
-                    shape: sessionInfo?.track_shape, // Ensure you saved this in sessionInfo
-                    corners: sessionInfo?.track_corners 
-                  }}
-              /> */}
       </div>
       <div className="flex-grow bg-slate-800 rounded-xl border border-slate-700 overflow-hidden relative">
                {analysisDriver ? (
                    <DriverAnalysisPanel 
                        driver={analysisDriver} 
                        sessionKey={activeSession} 
+                       trackData={{ 
+                        shape: sessionInfo?.track_shape, // Ensure you saved this in sessionInfo
+                        corners: sessionInfo?.track_corners 
+                      }}
                        currentTimestamp={currentTimestamp}
                        onClose={() => setAnalysisDriver(null)}
                    />

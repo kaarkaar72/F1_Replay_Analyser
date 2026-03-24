@@ -1,5 +1,6 @@
 import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LabelList } from 'recharts';
 import { ReferenceDot, Label } from 'recharts';
+import { useMemo } from 'react';
 export default function DriverTrackMap({ driver, trackData, lapTelemetry, driverTelemetry}) {
   if (!trackData) return null;
   // console.log(lapTelemetry)
@@ -7,7 +8,7 @@ export default function DriverTrackMap({ driver, trackData, lapTelemetry, driver
   const lapPoints = (lapTelemetry && lapTelemetry.length > 0) ? lapTelemetry : trackData.shape;
   const mapPoints = (driverTelemetry && driverTelemetry.length > 0) ? driverTelemetry : trackData.shape;
 
-  console.log(mapPoints)
+//   console.log(mapPoints)
   const getDriverColor = (speed) => {
     if (!speed) return "#334155"; // Default Grey
     if (speed > 290) return "#ef4444"; // Red (Fast)
@@ -15,6 +16,12 @@ export default function DriverTrackMap({ driver, trackData, lapTelemetry, driver
     if (speed > 100) return "#22c55e"; // Green
     return "#3b82f6"; // Blue (Slow)
   };
+
+  const heatmapData = useMemo(() => {
+      if (!lapTelemetry) return [];
+      // Take every 5th point (reduces DOM nodes by 80%)
+      return lapTelemetry.filter((_, i) => i % 3 === 0);
+    }, [lapTelemetry]);
 //   console.log("Track Data:", trackData);
     // console.log(driver.lap)
     // console.log("Reference Lap",lapTelemetry)
@@ -89,8 +96,8 @@ export default function DriverTrackMap({ driver, trackData, lapTelemetry, driver
                     </ReferenceDot>
               ))}
 
-            <Scatter name="Driver Best" data={lapPoints} shape="circle">
-                {mapPoints.map((p, i) => (
+            {/* <Scatter name="Driver Best" data={heatmapData} shape="circle">
+                {heatmapData.map((p, i) => (
                     <Cell 
                         key={`pt-${i}`} 
                         fill={getDriverColor(p.speed)} 
@@ -98,10 +105,10 @@ export default function DriverTrackMap({ driver, trackData, lapTelemetry, driver
                         r={4} // Thicker if it has data
                     />
                 ))}
-            </Scatter>
+            </Scatter> */}
 
-            <Scatter name="Driver Best" data={mapPoints} shape="circle">
-                {mapPoints.map((p, i) => (
+            <Scatter name="Driver Best" data={heatmapData} shape="circle">
+                {heatmapData.map((p, i) => (
                     <Cell 
                         key={`pt-${i}`} 
                         fill={getDriverColor(p.speed)} 
