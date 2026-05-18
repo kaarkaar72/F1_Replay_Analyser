@@ -159,13 +159,27 @@ for message in consumer:
             event_time = int(data.get('event_time_ms', time.time() * 1000))
             session_key = str(data.get('session_key'))
             lap_duration = float(data.get('lap_duration', 0))
+
+            lap_api = int(data.get('lap_number') or 0)
+
+            # Lap 1 in the OpenF1 API is always the formation/reconnaissance lap.
+            # It has no valid lap_duration and no telemetry worth storing.
+            # Skip it entirely and offset all subsequent laps by -1 so that
+            # OpenF1 lap 2 (the first racing lap) becomes racing lap 1.
+            FORMATION_LAP = 1
+            if lap_api <= FORMATION_LAP:
+                print(f"⏭️ Skipping formation lap for driver {driver_id}")
+                continue
+
+            lap = lap_api - 1  # racing lap number (1-indexed)
+
             try:
                 start_time_ms = event_time - int(lap_duration * 1000)
                 if lap_duration > 0:
                     point = Point("laps") \
                     .tag("driver", driver_id) \
                     .tag("session", f"s_{session_key}") \
-                    .tag("lap_number", int(data.get('lap_number', 0))) \
+                    .tag("lap_number", lap) \
                     .field("lap_duration", lap_duration) \
                     .field("start_time_ms", start_time_ms) \
                     .field("end_time_ms", event_time)  \
@@ -177,28 +191,27 @@ for message in consumer:
                     .field("segments_s3",json.dumps(data['segments_sector_3'])) \
                     .time(event_time, write_precision='ms')
                     write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
-                    print(f"💾 Saved Lap {data['lap_number']} to Influx")
+                    print(f"💾 Saved Racing Lap {lap} (OpenF1 lap {lap_api}) to Influx")
             except Exception as e:
                 print(f"Influx Write Error: {e}")
 
-            lap = int(data.get('lap_number') or 0)
             record_key = f"stats2:{session_key}:fastest_lap"
             pb_key = f"stats2:{session_key}:driver:{driver_id}:best_lap"
             current_lap_pb_record = redis_client.hgetall(record_key)
             current_driver_pb_record = redis_client.hgetall(pb_key)
             current_lap_pb = float(current_lap_pb_record.get('time', 0) or float('inf'))
             current_driver_pb = float(current_driver_pb_record.get('time',0) or float('inf'))
-            
+
             print(current_lap_pb,current_driver_pb,lap_duration)
-            
-            if lap_duration < current_lap_pb:
+
+            if lap_duration > 0 and lap_duration < current_lap_pb:
                 print(f"🚀 New Fastest Lap! Driver {driver_id} - {lap_duration}s")
                 redis_client.hset(record_key, mapping={
                     "time": lap_duration,
                     "driver": driver_id,
                     "lap": lap
                 })
-            if lap_duration < current_driver_pb:
+            if lap_duration > 0 and lap_duration < current_driver_pb:
                 redis_client.hset(pb_key, mapping={"time": lap_duration, "driver":driver_id,"lap": lap})
             redis_client.hset(redis_key, mapping={
                 "lap": lap,
@@ -217,12 +230,13 @@ for message in consumer:
                 "s1": data.get('duration_sector_1'),
                 "s2": data.get('duration_sector_2'),
                 "s3": data.get('duration_sector_3'),
-                "segments_s1": data.get('segments_sector_1'), # Send the list directly
+                "segments_s1": data.get('segments_sector_1'),
                 "segments_s2": data.get('segments_sector_2'),
-                "segments_s3": data.get('segments_sector_3')
+                "segments_s3": data.get('segments_sector_3'),
+                "timestamp": event_time
             }
             redis_client.publish("f1-live-stream", json.dumps(lap_payload))
-            print(f"🏁 Driver {driver_id} Lap {lap}")
+            print(f"🏁 Driver {driver_id} Racing Lap {lap}")
 
         elif topic == 'f1-position2':
             pos = int(data.get('position', 0))

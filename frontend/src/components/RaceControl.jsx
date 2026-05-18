@@ -4,7 +4,7 @@ import { Play, Square, Loader2, X, Settings2, Activity, BarChart2} from 'lucide-
 
 const API_URL = "http://localhost:8000";
 
-export default function RaceControl({ currentView, setView, onSessionChange, onLoadMetadata, totalLaps, onClose }) {
+export default function RaceControl({ currentView, setView, onSessionChange, onLoadMetadata, totalLaps, onClose, setLoadingStage }) {
   // --- STATE ---
   const [seasons, setSeasons] = useState([]);
   const [meetings, setMeetings] = useState([]);
@@ -53,20 +53,25 @@ export default function RaceControl({ currentView, setView, onSessionChange, onL
   const handleStart = async () => {
     if (!selectedSession) return;
     setStatus("loading");
-    
+
     try {
-      // 1. Load Metadata First
+      // 1. Load Metadata (stages 1 → 2 in overlay)
       await onLoadMetadata(selectedSession);
-      
-      // 2. Start Simulation
+
+      // 2. Advance overlay to stage 3 before hitting the simulation API
+      setLoadingStage?.(3);
+
+      // 3. Start Simulation
       const res = await fetch(`${API_URL}/simulation/start?session_key=${selectedSession}`, { method: 'POST' });
-      
+
       if (res.ok) setStatus("running");
       else setStatus("idle");
-      
+
     } catch (e) {
       console.error(e);
       setStatus("idle");
+    } finally {
+      setLoadingStage?.(0); // always clear the overlay when done (success or error)
     }
   };
 

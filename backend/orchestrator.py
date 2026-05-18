@@ -32,12 +32,13 @@ INFLUX_BUCKET = "f1_telemetry"
 influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 query_api = influx_client.query_api()
 def get_headers():
-    token = r.get("f1_api_token")
-    if not token:
-        print("⚠️ No Token in Redis! Waiting...")
-        time.sleep(5)
-        return get_headers()
-    return {"accept": "application/json", "Authorization": f"Bearer {token}"}
+    for attempt in range(12):
+        token = r.get("f1_api_token")
+        if token:
+            return {"accept": "application/json", "Authorization": f"Bearer {token}"}
+        print(f"⚠️ No Token in Redis! Waiting... (attempt {attempt + 1}/12)")
+        import time as _time; _time.sleep(5)
+    raise RuntimeError("❌ f1_api_token not found in Redis after 60s — is auth.py running?")
 HEADERS = get_headers()
 # Global variable to track the running process
 current_process = None
@@ -160,10 +161,13 @@ def stop_simulation():
 
 @app.post("/simulation/seek")
 def seek_simulation(session_key: int, lap: int):
-    print(f"⏩ Seeking Session {session_key} to Lap {lap}...")
-    # 1. Stop current
+    print(f"⏩ Seeking Session {session_key} to Racing Lap {lap}...")
     stop_simulation()
-    start_simulation(session_key=session_key,start_lap=lap)
+    # The frontend sends 1-indexed racing laps. OpenF1 lap numbers are offset by
+    # +1 because lap 1 in OpenF1 is the formation lap.  Convert back here so the
+    # producer fetches the correct lap start timestamp from the API.
+    openf1_lap = lap + 1
+    start_simulation(session_key=session_key, start_lap=openf1_lap)
     return {"status": "seeking", "lap": lap}
 
 
@@ -246,20 +250,20 @@ def get_telemetry_trace(session_key: int, driver_id: int, time: int = None):
     if time:
         # Convert MS to Seconds
         ts_sec = time / 1000
-        
-        # Create Aware Datetime (UTC)
-        dt_stop = datetime.fromtimestamp(ts_sec,tz=timezone.utc)
-        dt_start = dt_stop - timedelta(minutes=2)
-        
-        # Format as ISO 8601 (Influx Requirement)
-        stop_iso = dt_stop.isoformat() 
-        start_iso = dt_start.isoformat()
-        # print(start_iso,stop_iso)
-        range_filter = f'|> range(start: {start_iso}, stop: {stop_iso})'
 
+        # Create Aware Datetime (UTC)
+        dt_stop = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
+        dt_start = dt_stop - timedelta(minutes=2)
+
+        # Format as ISO 8601 (Influx Requirement)
+        stop_iso = dt_stop.isoformat()
+        start_iso = dt_start.isoformat()
     else:
         # Live Mode: Window is [Now-2m, Now]
-        range_filter = "|> range(start: -2m)"
+        dt_stop = datetime.now(tz=timezone.utc)
+        dt_start = dt_stop - timedelta(minutes=2)
+        stop_iso = dt_stop.isoformat()
+        start_iso = dt_start.isoformat()
     # Query last 2 minutes of Speed, Throttle, Brake
     # We use aggregateWindow to downsample to prevent UI lag (e.g. 1 point every 100ms)
     query = f"""
@@ -351,6 +355,7 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
                 total_dist += dist_step
 
             data.append({
+                "time":current_time,
                 "distance": int(total_dist),
                 "speed": int(speed_kph),
                 "throttle": int(record.values.get("throttle", 0)),
@@ -367,7 +372,7 @@ def get_telemetry_over_time(session_key,driver_id,start_iso,stop_iso):
     return data
 
 
-def get_advanced_metrics_for_lap_telemetry(data):
+def get_metrics_for_lap_telemetry(data):
     speeds = [p['speed'] for p in data]
     throttles = [p['throttle'] for p in data]
     brakes = [p['brake'] for p in data]
@@ -435,6 +440,179 @@ def get_corner_metrics_for_lap_telemetry(data,corner_map):
         
     return corner_stats
 
+def get_advanced_metrics_for_lap_telemetry(telemetry_data, corner_stats, session_key):
+    """
+    Computes 10 F1-grade advanced metrics from telemetry data.
+    Requires: 'time' field in each telemetry point (in seconds since epoch).
+    Returns a dictionary of metrics.
+    """
+    if not telemetry_data:
+        return {}
+    print(telemetry_data)
+    # Extract data
+    speeds = [p['speed'] for p in telemetry_data]
+    throttles = [p['throttle'] for p in telemetry_data]
+    brakes = [p['brake'] for p in telemetry_data]
+    gears = [p['gear'] for p in telemetry_data]
+    x_coords = [p['x'] for p in telemetry_data]
+    y_coords = [p['y'] for p in telemetry_data]
+    times = [p['time'] for p in telemetry_data]
+
+    # 1. Cornering Efficiency (CE) – per corner
+    corner_efficiencies = []
+    for corner in corner_stats:
+        corner_num = corner['number']
+        apex_speed = corner['apex_speed']
+        min_speed = corner['min_speed']
+
+        # Estimate max possible speed using lateral G and radius
+        # Use a conservative proxy: max possible = min_speed + 50 km/h
+        max_possible = min_speed + 50
+        ce = apex_speed / max_possible if max_possible > 0 else 0
+        corner_efficiencies.append({
+            "turn": corner_num,
+            "efficiency": min(ce, 1.0)  # cap at 1.0
+        })
+
+    # 2. Braking Efficiency (BE) – energy dissipation efficiency
+    # Use peak brake vs. kinetic energy (simplified)
+    brake_peaks = [b for b in brakes if b > 80]
+    if brake_peaks:
+        avg_brake_peak = sum(brake_peaks) / len(brake_peaks)
+        avg_speed_before_brake = sum(speeds) / len(speeds)
+        # BE = brake_peak / (speed^2) → higher = better
+        be = avg_brake_peak / (avg_speed_before_brake ** 2 + 0.01)
+    else:
+        be = 0
+
+    # 3. Throttle Smoothness (TS)
+    # Rate of change of throttle over time (in % per second)
+    if len(telemetry_data) > 1:
+        delta_rates = []
+        for i in range(1, len(telemetry_data)):
+            dt = times[i] - times[i-1]  # seconds
+            if dt > 0:
+                delta = abs(throttles[i] - throttles[i-1])
+                delta_rate = delta / dt  # % per second
+                delta_rates.append(delta_rate)
+        if delta_rates:
+            std_dev = (sum(d ** 2 for d in delta_rates) / len(delta_rates)) ** 0.5
+            mean_throttle = sum(throttles) / len(throttles)
+            ts = 1 - (std_dev / (mean_throttle + 0.01))
+        else:
+            ts = 0
+    else:
+        ts = 0
+
+    # 4. Gear Change Aggression (GCA)
+    # Time between gear shifts (in seconds)
+    gear_changes = []
+    for i in range(1, len(gears)):
+        if gears[i] != gears[i-1]:
+            dt = times[i] - times[i-1]
+            gear_changes.append(dt)
+    if gear_changes:
+        avg_shift_time = sum(gear_changes) / len(gear_changes)
+        gca = 1 / (avg_shift_time + 0.001)  # faster = higher aggression
+    else:
+        gca = 0
+
+    # 5. Lap Time Delta vs Session Best
+    session_best = r.hgetall(f"stats2:{session_key}:fastest_lap")
+    if session_best:
+        best_lap_time = float(session_best.get('time', 0))
+        lap_start = times[0]
+        lap_end = times[-1]
+        current_lap_time = lap_end - lap_start
+        lap_delta = current_lap_time - best_lap_time
+    else:
+        lap_delta = 0
+
+    # 6. G-Force Utilization (G-Util)
+    # Lateral G-force magnitude: sqrt(x² + y²)
+    lateral_g = []
+    for i in range(len(x_coords)):
+        g_mag = (x_coords[i]**2 + y_coords[i]**2)**0.5
+        lateral_g.append(g_mag)
+    avg_lateral_g = sum(lateral_g) / len(lateral_g) if lateral_g else 0
+    max_lateral_g = max(lateral_g) if lateral_g else 1
+    g_util = avg_lateral_g / (max_lateral_g + 0.01)
+
+    # 7. Braking Zone Duration (BZD)
+    # Total time brake > 50% (in seconds)
+    in_braking = False
+    brake_duration = 0.0
+    for i in range(1, len(telemetry_data)):
+        dt = times[i] - times[i-1]
+        if brakes[i] > 50 and not in_braking:
+            in_braking = True
+        elif brakes[i] < 10 and in_braking:
+            brake_duration += dt
+            in_braking = False
+    # Handle case where brake is still on at end
+    if in_braking:
+        brake_duration += times[-1] - times[-2]
+
+    # 8. Acceleration Gradient (AG) – post-apex speed gain
+    # Find apex point (lowest speed in corner)
+    apex_point = None
+    for corner in corner_stats:
+        corner_data = [p for p in telemetry_data if abs(p['distance_pct'] - corner['distance_pct']) < 2.0]
+        if corner_data:
+            apex = min(corner_data, key=lambda p: p['speed'])
+            if apex_point is None or apex['speed'] < apex_point['speed']:
+                apex_point = apex
+
+    if apex_point:
+        # Find points after apex (distance_pct > apex + 10)
+        post_apex = [p for p in telemetry_data if p['distance_pct'] > (apex_point['distance_pct'] + 10)]
+        if len(post_apex) > 1:
+            t0 = post_apex[0]['time']
+            t1 = post_apex[-1]['time']
+            dt = t1 - t0
+            if dt > 0:
+                v0 = post_apex[0]['speed']
+                v1 = post_apex[-1]['speed']
+                ag = (v1 - v0) / dt  # km/h per second
+            else:
+                ag = 0
+        else:
+            ag = 0
+    else:
+        ag = 0
+
+    # 9. RPM Overlap (RPM-O) – % of time above 80% redline
+    # Assume redline = 18000 RPM
+    rpm_redline = 18000
+    rpm_data = [p.get('rpm', 0) for p in telemetry_data]
+    rpm_overlap = sum(1 for r in rpm_data if r > 0.8 * rpm_redline) / len(rpm_data) if rpm_data else 0
+
+    # 10. Line Consistency (LC) – std dev of x,y over corners
+    line_stddev = []
+    for corner in corner_stats:
+        corner_data = [p for p in telemetry_data if abs(p['distance_pct'] - corner['distance_pct']) < 2.0]
+        if corner_data:
+            x_vals = [p['x'] for p in corner_data]
+            y_vals = [p['y'] for p in corner_data]
+            x_mean = sum(x_vals) / len(x_vals)
+            y_mean = sum(y_vals) / len(y_vals)
+            x_var = sum((x - x_mean)**2 for x in x_vals) / len(x_vals)
+            y_var = sum((y - y_mean)**2 for y in y_vals) / len(y_vals)
+            line_stddev.append((x_var + y_var)**0.5)
+    lc = sum(line_stddev) / len(line_stddev) if line_stddev else 0
+
+    return {
+        "cornering_efficiency": corner_efficiencies,
+        "braking_efficiency": round(be, 3),
+        "throttle_smoothness": round(ts, 3),
+        "gear_change_aggression": round(gca, 3),
+        "lap_time_delta": round(lap_delta, 3),
+        "g_force_utilization": round(g_util, 3),
+        "braking_zone_duration": round(brake_duration, 2),
+        "acceleration_gradient": round(ag, 1),
+        "rpm_overlap": round(rpm_overlap * 100, 1),
+        "line_consistency": round(lc, 3)
+    }
 
 def get_sector_times_lap(session_key,driver_id,lap_number):
     session_info = get_session_info(session_key)
@@ -442,7 +620,7 @@ def get_sector_times_lap(session_key,driver_id,lap_number):
     sector_query = f"""
     from(bucket: "{INFLUX_BUCKET}")
       |> range(start: {date_str}T00:00:00Z, stop: {date_str}T23:59:59Z)
-      |> filter(fn: (r) => r["session"] == "{session_key}" and r["driver"] == "{driver_id}")
+      |> filter(fn: (r) => r["session"] == "s_{session_key}" and r["driver"] == "{driver_id}")
       |> filter(fn: (r) => r["lap_number"] == "{lap_number}")
       |> filter(fn: (r) => r["_field"] == "s1" or r["_field"] == "s2" or r["_field"] == "s3" or r["_field"] == "lap_duration" )
       |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
@@ -473,20 +651,19 @@ def get_lap_telemetry_trace(session_key: int, driver_id: int, lap_number: int = 
     try:
         start_lap_iso,stop_lap_iso = get_lap_times_for_lap(session_key,driver_id,lap_number)
         sectors = get_sector_times_lap(session_key,driver_id,lap_number)
-        # print(start_lap_iso,stop_lap_iso)
         telemetry_data = get_telemetry_over_time(session_key,driver_id,start_lap_iso,stop_lap_iso)
-        # print(telemetry_data)
         track_meta = json.loads(r.get(f"metadata:tracks:{session_key}"))
         corner_map = track_meta['corners']
 
-        metrics = get_advanced_metrics_for_lap_telemetry(telemetry_data)
-        # print(metrics)
+        metrics = get_metrics_for_lap_telemetry(telemetry_data)
         corner_stats = get_corner_metrics_for_lap_telemetry(telemetry_data,corner_map)
-        # print(corner_stats)
+        advanced_metrics = get_advanced_metrics_for_lap_telemetry(telemetry_data,corner_stats,session_key)
+        print(advanced_metrics)
         data = {"lap":lap_number,
                 "driver":driver_id,
                 "trace": telemetry_data,
                 "metrics":metrics,
+                "advanced_metrics":advanced_metrics,
                 "sectors":sectors,
                 "corner_stat":corner_stats}
         # print(data)
@@ -507,13 +684,11 @@ def get_reference_lap_trace(session_key: int):
     if not stats:
         return [] # No laps yet
 
-    print("ASDSDADSDCASDSA")
     driver_id = int(stats['driver'])
     lap_num = int(stats['lap'])
     
     # 2. Fetch Telemetry for that specific Driver/Lap
     data = get_lap_telemetry_trace(session_key, driver_id, lap_num)
-    print(data)
     return data
 
 
@@ -628,38 +803,42 @@ def get_session_info(session_key: int):
     laps_data = requests.get(laps_url,headers=HEADERS).json()
     
     # 3. Calculate "Race Clock" Map (The Fix)
+    # Lap 1 in the OpenF1 API is the formation/reconnaissance lap — it is not a
+    # scored racing lap and has no telemetry stored in InfluxDB.  We filter it
+    # out here and shift all subsequent lap numbers down by 1 so that the
+    # frontend always deals in 1-indexed *racing* laps.
+    FORMATION_LAP = 1
     lap_map = []
     total_laps = 0
     import pandas as pd
     if laps_data:
         df_laps = pd.DataFrame(laps_data)
-        
-        # Filter out garbage data
+
+        # Filter out garbage data and the formation lap
         df_laps = df_laps.dropna(subset=['date_start'])
-        
+        df_laps = df_laps[df_laps['lap_number'] > FORMATION_LAP]
+
         # Group by Lap Number -> Get Earliest Start Time (The Leader)
-        # We sort by lap_number to ensure order
         leader_laps = df_laps.groupby('lap_number')['date_start'].min().reset_index().sort_values('lap_number')
-        
+
         lap_map = []
         for _, row in leader_laps.iterrows():
-            # Parse the ISO string
-            # Handle the Z or +00:00 logic if needed, but fromisoformat usually handles it
             try:
                 dt = datetime.fromisoformat(row['date_start'].replace('Z', '+00:00'))
-                # Format as "14:24" (24-hour clock)
                 time_str = dt.strftime("%H:%M")
             except:
                 time_str = "--:--"
 
+            # Offset lap number by -1: OpenF1 lap 2 → racing lap 1
+            racing_lap = int(row['lap_number']) - FORMATION_LAP
             lap_map.append({
-                "lap": int(row['lap_number']),
+                "lap": racing_lap,
                 "start_time": time_str,
-                "start_time_ms": to_ms(row['date_start']) # Send the clean string
+                "start_time_ms": to_ms(row['date_start'])
             })
-        
-        # Get max lap
-        total_laps = int(leader_laps['lap_number'].max())
+
+        # Total laps is the highest racing lap number
+        total_laps = int(leader_laps['lap_number'].max()) - FORMATION_LAP
 
     payload = {
         "name": meet_data['meeting_name'],
